@@ -32,13 +32,49 @@ echo "[ABK-BPF] 目标 defconfig: $DEFCONFIG"
 echo "[ABK-BPF] CONFIG 变量:    ${CONFIG:-未知}"
 echo "[ABK-BPF] KERNEL_ROOT:    ${KERNEL_ROOT:-未知}"
 
-# 定位内核源码根目录（DEFCONFIG 通常在 common/arch/arm64/configs/）
-KERNEL_SRC="${KERNEL_ROOT:-}/common"
-if [[ ! -d "$KERNEL_SRC" ]]; then
-    # 回退：从 DEFCONFIG 路径推断
-    KERNEL_SRC=$(dirname "$(dirname "$(dirname "$(dirname "$DEFCONFIG")")")")
+# 定位内核源码根目录（即包含 kernel/, security/, net/ 等子目录的 common/）
+# ABK 约定：KERNEL_ROOT 指向 android13-5.15-119 等，内核源码在其下的 common/
+# DEFCONFIG 路径形如 .../android13-5.15-119/common/arch/arm64/configs/gki_defconfig
+KERNEL_SRC=""
+if [[ -n "${KERNEL_ROOT:-}" ]]; then
+    KERNEL_SRC="${KERNEL_ROOT}/common"
 fi
+if [[ ! -d "$KERNEL_SRC" ]]; then
+    KERNEL_SRC=""
+fi
+
+if [[ -z "$KERNEL_SRC" ]] && [[ -n "${DEFCONFIG:-}" ]]; then
+    # 从 DEFCONFIG 路径推断：找路径中 "common" 所在位置
+    case "$DEFCONFIG" in
+        */common/arch/arm64/configs/*)
+            KERNEL_SRC="${DEFCONFIG%/arch/arm64/configs/*}"
+            ;;
+        */common/arch/*)
+            KERNEL_SRC="${DEFCONFIG%/arch/*}"
+            ;;
+        *)
+            KERNEL_SRC=$(dirname "$(dirname "$(dirname "$DEFCONFIG")")")
+            ;;
+    esac
+fi
+
+if [[ -z "$KERNEL_SRC" ]] || [[ ! -d "$KERNEL_SRC" ]]; then
+    echo "[ABK-BPF][ERROR] 无法定位内核源码根目录"
+    echo "[ABK-BPF][ERROR] KERNEL_ROOT=${KERNEL_ROOT:-未设置}"
+    echo "[ABK-BPF][ERROR] DEFCONFIG=${DEFCONFIG:-未设置}"
+    echo "[ABK-BPF][ERROR] 推断 KERNEL_SRC=${KERNEL_SRC:-空}"
+    exit 1
+fi
+
 echo "[ABK-BPF] 内核源码根: $KERNEL_SRC"
+
+# 验证源码根目录结构
+for subdir in kernel security net; do
+    if [[ ! -d "$KERNEL_SRC/$subdir" ]]; then
+        echo "[ABK-BPF][WARN] $KERNEL_SRC/$subdir 不存在（可能影响 Kconfig patch）"
+    fi
+done
+echo "[ABK-BPF] 路径验证完成"
 
 # 备份原始 defconfig
 BACKUP="${DEFCONFIG}.abk-bpf.bak"
@@ -124,38 +160,59 @@ echo "[ABK-BPF] 检查 FUNCTION_TRACER Kconfig: $TRACE_KCFG"
 if [[ -f "$TRACE_KCFG" ]]; then
     # 查看当前 FUNCTION_TRACER 定义
     echo "[ABK-BPF] 当前 FUNCTION_TRACER Kconfig 定义:"
-    grep -A 8 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null || echo "  (未找到 config FUNCTION_TRACER 条目)"
+    grep -A 12 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null || echo "  (未找到 config FUNCTION_TRACER 条目)"
 
-    # 备份并修改：将 default n 改为 default y（如果存在）
-    if grep -A 8 "^config FUNCTION_TRACER" "$TRACE_KCFG" | grep -q "default n"; then
-        if [[ ! -f "${TRACE_KCFG}.abk-bpf.bak" ]]; then
-            cp "$TRACE_KCFG" "${TRACE_KCFG}.abk-bpf.bak"
-        fi
-        # 精确替换 FUNCTION_TRACER 块中的 default n 为 default y
-        # 用 awk 定位 config FUNCTION_TRACER 块并修改
-        awk '
-        /^config FUNCTION_TRACER$/ { in_block=1 }
-        in_block && /^	default n$/ { sub(/default n/, "default y"); print; next }
-        in_block && /^config / && !/^config FUNCTION_TRACER$/ { in_block=0 }
-        { print }
-        ' "$TRACE_KCFG" > "${TRACE_KCFG}.tmp" && mv "${TRACE_KCFG}.tmp" "$TRACE_KCFG"
-        echo "[ABK-BPF] 已将 FUNCTION_TRACER 的 default n 改为 default y"
-    else
-        echo "[ABK-BPF] FUNCTION_TRACER 无 default n，可能是其他原因限制"
+    if [[ ! -f "${TRACE_KCFG}.abk-bpf.bak" ]]; then
+        cp "$TRACE_KCFG" "${TRACE_KCFG}.abk-bpf.bak"
     fi
 
-    # 同样处理 FTRACE_SYSCALLS
-    if grep -A 5 "^config FTRACE_SYSCALLS" "$TRACE_KCFG" | grep -q "default n"; then
-        awk '
-        /^config FTRACE_SYSCALLS$/ { in_block=1 }
-        in_block && /^	default n$/ { sub(/default n/, "default y"); print; next }
-        in_block && /^config / && !/^config FTRACE_SYSCALLS$/ { in_block=0 }
-        { print }
-        ' "$TRACE_KCFG" > "${TRACE_KCFG}.tmp" && mv "${TRACE_KCFG}.tmp" "$TRACE_KCFG"
-        echo "[ABK-BPF] 已将 FTRACE_SYSCALLS 的 default n 改为 default y"
-    fi
+    # 用 python 精确替换 config 块（比 awk 更可靠）
+    # 策略：删除原 config FUNCTION_TRACER 块，追加新块（无 depends on，default y）
+    python3 - "$TRACE_KCFG" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+new_block = '''config FUNCTION_TRACER
+	bool "Function Tracer"
+	default y
+	help
+	  Enable the function tracer.
+
+config FTRACE_SYSCALLS
+	bool "Trace syscalls"
+	depends on FTRACE
+	default y
+	help
+	  Enable tracing of syscalls.
+'''
+
+# 匹配 config FUNCTION_TRACER 块到下一个 config 或文件末尾
+pattern = r'config FUNCTION_TRACER\b.*?(?=\nconfig [A-Z_]|\Z)'
+content_new, n1 = re.subn(pattern, '', content, flags=re.DOTALL)
+
+# 匹配 config FTRACE_SYSCALLS 块
+pattern2 = r'config FTRACE_SYSCALLS\b.*?(?=\nconfig [A-Z_]|\Z)'
+content_new, n2 = re.subn(pattern2, '', content_new, flags=re.DOTALL)
+
+# 追加新块（在文件末尾）
+if n1 > 0 or n2 > 0:
+    content_new = content_new.rstrip() + '\n\n' + new_block
+    with open(path, 'w') as f:
+        f.write(content_new)
+    print(f"[ABK-BPF] 已替换 FUNCTION_TRACER (n={n1}) 和 FTRACE_SYSCALLS (n={n2}) Kconfig 块")
+else:
+    # 没找到原块，直接追加
+    with open(path, 'a') as f:
+        f.write('\n\n' + new_block)
+    print("[ABK-BPF] FUNCTION_TRACER/FTRACE_SYSCALLS 未找到原块，已追加新块")
+PYEOF
+
+    echo "[ABK-BPF] patch 后的 FUNCTION_TRACER 定义:"
+    grep -A 6 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null
 else
-    echo "[ABK-BPF][WARN] kernel/trace/Kconfig 不存在"
+    echo "[ABK-BPF][ERROR] kernel/trace/Kconfig 不存在: $TRACE_KCFG"
 fi
 
 # --- 2.2 patch security/Kconfig：添加 SECURITY_BPF 和 BPF_LSM 条目 ---
