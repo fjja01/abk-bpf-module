@@ -166,51 +166,53 @@ if [[ -f "$TRACE_KCFG" ]]; then
         cp "$TRACE_KCFG" "${TRACE_KCFG}.abk-bpf.bak"
     fi
 
-    # 用 python 精确替换 config 块（比 awk 更可靠）
-    # 策略：删除原 config FUNCTION_TRACER 块，追加新块（无 depends on，default y）
+    # 用 python 做最小修改（保留原 select 语句，避免编译错误）
+    # 策略：
+    #   1. 删除 depends on HAVE_FUNCTION_TRACER（解除 arm64 缺失的依赖）
+    #   2. 在 bool 行后添加 default y（如果不存在）
+    # 注意：不能整体替换 config 块，否则会丢失 select TASKS_RUDE_RCU 等关键语句
+    #       导致 ftrace.c 调用 synchronize_rcu_tasks_rude() 时编译失败
     python3 - "$TRACE_KCFG" <<'PYEOF'
 import re, sys
 path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 
-new_block = '''config FUNCTION_TRACER
-	bool "Function Tracer"
-	default y
-	help
-	  Enable the function tracer.
+changes = []
 
-config FTRACE_SYSCALLS
-	bool "Trace syscalls"
-	depends on FTRACE
-	default y
-	help
-	  Enable tracing of syscalls.
-'''
+# 1. 删除 FUNCTION_TRACER 的 depends on HAVE_FUNCTION_TRACER
+new_content, n1 = re.subn(r'\tdepends on HAVE_FUNCTION_TRACER\n', '', content)
+if n1 > 0:
+    changes.append(f"删除 depends on HAVE_FUNCTION_TRACER (n={n1})")
 
-# 匹配 config FUNCTION_TRACER 块到下一个 config 或文件末尾
-pattern = r'config FUNCTION_TRACER\b.*?(?=\nconfig [A-Z_]|\Z)'
-content_new, n1 = re.subn(pattern, '', content, flags=re.DOTALL)
+# 2. 在 config FUNCTION_TRACER 块的 bool 行后插入 default y
+def add_default_after_bool(match):
+    block = match.group(0)
+    if 'default y' in block:
+        return block
+    return block + '\tdefault y\n'
 
-# 匹配 config FTRACE_SYSCALLS 块
-pattern2 = r'config FTRACE_SYSCALLS\b.*?(?=\nconfig [A-Z_]|\Z)'
-content_new, n2 = re.subn(pattern2, '', content_new, flags=re.DOTALL)
+pattern_ft = r'config FUNCTION_TRACER\n\tbool "[^"]*"\n'
+new_content, n2 = re.subn(pattern_ft, add_default_after_bool, new_content)
+if n2 > 0:
+    changes.append(f"FUNCTION_TRACER 添加 default y (n={n2})")
 
-# 追加新块（在文件末尾）
-if n1 > 0 or n2 > 0:
-    content_new = content_new.rstrip() + '\n\n' + new_block
+# 3. 在 config FTRACE_SYSCALLS 块的 bool 行后插入 default y
+pattern_fs = r'config FTRACE_SYSCALLS\n\tbool "[^"]*"\n'
+new_content, n3 = re.subn(pattern_fs, add_default_after_bool, new_content)
+if n3 > 0:
+    changes.append(f"FTRACE_SYSCALLS 添加 default y (n={n3})")
+
+if changes:
     with open(path, 'w') as f:
-        f.write(content_new)
-    print(f"[ABK-BPF] 已替换 FUNCTION_TRACER (n={n1}) 和 FTRACE_SYSCALLS (n={n2}) Kconfig 块")
+        f.write(new_content)
+    print(f"[ABK-BPF] Kconfig patch 完成: {'; '.join(changes)}")
 else:
-    # 没找到原块，直接追加
-    with open(path, 'a') as f:
-        f.write('\n\n' + new_block)
-    print("[ABK-BPF] FUNCTION_TRACER/FTRACE_SYSCALLS 未找到原块，已追加新块")
+    print("[ABK-BPF] Kconfig 无需修改（可能已 patch）")
 PYEOF
 
     echo "[ABK-BPF] patch 后的 FUNCTION_TRACER 定义:"
-    grep -A 6 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null
+    grep -A 12 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null
 else
     echo "[ABK-BPF][ERROR] kernel/trace/Kconfig 不存在: $TRACE_KCFG"
 fi
