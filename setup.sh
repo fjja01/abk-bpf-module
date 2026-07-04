@@ -299,9 +299,10 @@ for frag in \
 done
 
 # 也检查 build.config 中的 fragment 引用
-if [[ -f "$BUILD_CONFIG" ]]; then
-    echo "[ABK-BPF] 检查 build.config 中的 fragment 引用:"
-    grep -i "fragment\|DEFCONFIG" "$BUILD_CONFIG" 2>/dev/null || echo "  (无 fragment 引用)"
+BUILD_CONFIG_FILE="${BUILD_CONFIG:-${KERNEL_SRC}/build.config.gki.aarch64}"
+if [[ -f "$BUILD_CONFIG_FILE" ]]; then
+    echo "[ABK-BPF] 检查 build.config 中的 fragment 引用: $BUILD_CONFIG_FILE"
+    grep -i "fragment\|DEFCONFIG" "$BUILD_CONFIG_FILE" 2>/dev/null || echo "  (无 fragment 引用)"
 fi
 
 if [[ $FRAGMENTS_FOUND -eq 0 ]]; then
