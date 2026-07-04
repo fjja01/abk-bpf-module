@@ -188,8 +188,9 @@ if [[ -f "$BUILD_CONFIG" ]]; then
             cp "$BUILD_CONFIG" "${BUILD_CONFIG}.abk-bpf.bak"
         fi
         # 追加 POST_DEFCONFIG_CMDS
-        # OUT_DIR 是 build/build.sh 设置的环境变量，指向输出目录
-        # .config 在 ${OUT_DIR}/common/.config
+        # OUT_DIR 是 build/build.sh 设置的环境变量，指向输出目录的 common 子目录
+        # 即 OUT_DIR=.../out/android13-5.15/common
+        # .config 在 ${OUT_DIR}/.config（不要加 /common，否则路径重复）
         # 用 \${OUT_DIR} 转义，在 source 时不展开，在 eval 执行时展开
         # common/scripts/config -e 启用 CONFIG，-d 禁用 CONFIG
         # 注意：POST_DEFCONFIG_CMDS 不能以分号开头（build/build.sh 用 eval 执行会语法错误）
@@ -200,10 +201,11 @@ if [[ -f "$BUILD_CONFIG" ]]; then
 # 在 make olddefconfig 后强制启用 BPF_LSM 和 FUNCTION_ERROR_INJECTION
 # 原因：make olddefconfig 会清除 defconfig 中的 BPF_LSM=y（原因未知）
 # BPF_LSM 依赖（BPF_EVENTS/BPF_SYSCALL/SECURITY/BPF_JIT）全部满足
+# 注意：OUT_DIR 已指向 .../out/android13-5.15/common，不要再加 /common
 if [ -z "${POST_DEFCONFIG_CMDS:-}" ]; then
-  POST_DEFCONFIG_CMDS="common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  POST_DEFCONFIG_CMDS="common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
 else
-  POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS} ; common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS} ; common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
 fi
 # === ABK_BPF_POST_DEFCONFIG END ===
 BCEOF
