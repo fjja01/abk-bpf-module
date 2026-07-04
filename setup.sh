@@ -192,18 +192,24 @@ if [[ -f "$BUILD_CONFIG" ]]; then
         # .config 在 ${OUT_DIR}/common/.config
         # 用 \${OUT_DIR} 转义，在 source 时不展开，在 eval 执行时展开
         # common/scripts/config -e 启用 CONFIG，-d 禁用 CONFIG
+        # 注意：POST_DEFCONFIG_CMDS 不能以分号开头（build/build.sh 用 eval 执行会语法错误）
+        # 如果 POST_DEFCONFIG_CMDS 已有值，用分号连接；否则直接赋值
         cat >> "$BUILD_CONFIG" <<'BCEOF'
 
 # === ABK_BPF_POST_DEFCONFIG ===
 # 在 make olddefconfig 后强制启用 BPF_LSM 和 FUNCTION_ERROR_INJECTION
 # 原因：make olddefconfig 会清除 defconfig 中的 BPF_LSM=y（原因未知）
 # BPF_LSM 依赖（BPF_EVENTS/BPF_SYSCALL/SECURITY/BPF_JIT）全部满足
-POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS:-} ; common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+if [ -z "${POST_DEFCONFIG_CMDS:-}" ]; then
+  POST_DEFCONFIG_CMDS="common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+else
+  POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS} ; common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+fi
 # === ABK_BPF_POST_DEFCONFIG END ===
 BCEOF
         echo "[ABK-BPF] 已添加 POST_DEFCONFIG_CMDS 到 build.config"
         echo "[ABK-BPF] POST_DEFCONFIG_CMDS 内容:"
-        grep "POST_DEFCONFIG_CMDS" "$BUILD_CONFIG" | tail -1
+        grep -A 4 "ABK_BPF_POST_DEFCONFIG ===" "$BUILD_CONFIG" | tail -4
     fi
 else
     echo "[ABK-BPF][ERROR] build.config.gki.aarch64 不存在: $BUILD_CONFIG"
