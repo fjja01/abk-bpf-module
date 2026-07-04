@@ -167,6 +167,147 @@ else
     echo "  $TRACE_KCFG 不存在"
 fi
 
+# --- 2.1.5 修改 kernel/bpf/Kconfig：移除 BPF_LSM 依赖 + 添加 default y ---
+# 诊断结论（2026-07-04，构建 28693529318）：
+#   - BPF_LSM 依赖（BPF_EVENTS/BPF_SYSCALL/SECURITY/BPF_JIT）全部满足
+#   - POST_DEFCONFIG_CMDS 成功设置 BPF_LSM=y
+#   - 但随后的 make olddefconfig 仍然清除了 BPF_LSM（原因未知，疑似 GKI 隐藏机制）
+#   - FUNCTION_ERROR_INJECTION 同样被清除（HAVE_FUNCTION_ERROR_INJECTION=y 已满足）
+# 解决方案：直接修改 Kconfig 源码
+#   1. 移除 BPF_LSM 的 depends on（让 olddefconfig 无法因依赖未满足而清除）
+#   2. 添加 default y（让 olddefconfig 对新符号默认启用）
+BPF_KCFG="${KERNEL_SRC}/kernel/bpf/Kconfig"
+echo ""
+echo "[ABK-BPF] 修改 BPF_LSM Kconfig: $BPF_KCFG"
+
+if [[ -f "$BPF_KCFG" ]]; then
+    if grep -q "ABK-BPF-BPF_LSM-MOD" "$BPF_KCFG" 2>/dev/null; then
+        echo "[ABK-BPF] BPF_LSM Kconfig 已修改（跳过）"
+    else
+        # 备份
+        if [[ ! -f "${BPF_KCFG}.abk-bpf.bak" ]]; then
+            cp "$BPF_KCFG" "${BPF_KCFG}.abk-bpf.bak"
+        fi
+
+        echo "[ABK-BPF] 修改前 BPF_LSM 条目:"
+        grep -A 8 "^config BPF_LSM$" "$BPF_KCFG" 2>/dev/null || echo "  (未找到)"
+
+        # 使用 awk 修改 BPF_LSM 条目：
+        # 1. 移除 depends on 行
+        # 2. 在 bool 行后添加 default y（如果不存在）
+        awk '
+            BEGIN { in_entry=0; added_default=0 }
+            /^config BPF_LSM$/ { in_entry=1 }
+            in_entry && /^config / && !/^config BPF_LSM$/ { in_entry=0; added_default=0 }
+            in_entry && /^menuconfig / { in_entry=0; added_default=0 }
+            in_entry && /^endmenu/ { in_entry=0; added_default=0 }
+            in_entry && /^\tdepends on/ { next }
+            in_entry && /^\tbool/ && added_default==0 {
+                print
+                print "\tdefault y"
+                added_default=1
+                next
+            }
+            in_entry && /^\tdefault y/ && added_default==1 { next }
+            { print }
+        ' "$BPF_KCFG" > "${BPF_KCFG}.tmp" && mv "${BPF_KCFG}.tmp" "$BPF_KCFG"
+
+        # 添加标记
+        echo "# ABK-BPF-BPF_LSM-MOD: removed depends on, added default y" >> "$BPF_KCFG"
+
+        echo "[ABK-BPF] 修改后 BPF_LSM 条目:"
+        grep -A 8 "^config BPF_LSM$" "$BPF_KCFG" 2>/dev/null || echo "  (未找到)"
+        echo "[ABK-BPF] 已修改 BPF_LSM Kconfig（移除 depends on，添加 default y）"
+    fi
+else
+    echo "[ABK-BPF][ERROR] kernel/bpf/Kconfig 不存在: $BPF_KCFG"
+fi
+
+# --- 2.1.6 修改 lib/Kconfig.debug：移除 FUNCTION_ERROR_INJECTION 依赖 ---
+DEBUG_KCFG="${KERNEL_SRC}/lib/Kconfig.debug"
+echo ""
+echo "[ABK-BPF] 修改 FUNCTION_ERROR_INJECTION Kconfig: $DEBUG_KCFG"
+
+if [[ -f "$DEBUG_KCFG" ]]; then
+    if grep -q "ABK-BPF-FUNC_ERR_INJ-MOD" "$DEBUG_KCFG" 2>/dev/null; then
+        echo "[ABK-BPF] FUNCTION_ERROR_INJECTION Kconfig 已修改（跳过）"
+    else
+        # 备份
+        if [[ ! -f "${DEBUG_KCFG}.abk-bpf.bak" ]]; then
+            cp "$DEBUG_KCFG" "${DEBUG_KCFG}.abk-bpf.bak"
+        fi
+
+        echo "[ABK-BPF] 修改前 FUNCTION_ERROR_INJECTION 条目:"
+        grep -A 6 "^config FUNCTION_ERROR_INJECTION$" "$DEBUG_KCFG" 2>/dev/null || echo "  (未找到)"
+
+        # 移除 FUNCTION_ERROR_INJECTION 的 depends on 行
+        awk '
+            BEGIN { in_entry=0 }
+            /^config FUNCTION_ERROR_INJECTION$/ { in_entry=1 }
+            in_entry && /^config / && !/^config FUNCTION_ERROR_INJECTION$/ { in_entry=0 }
+            in_entry && /^\tdepends on/ { next }
+            { print }
+        ' "$DEBUG_KCFG" > "${DEBUG_KCFG}.tmp" && mv "${DEBUG_KCFG}.tmp" "$DEBUG_KCFG"
+
+        # 添加标记
+        echo "# ABK-BPF-FUNC_ERR_INJ-MOD: removed depends on" >> "$DEBUG_KCFG"
+
+        echo "[ABK-BPF] 修改后 FUNCTION_ERROR_INJECTION 条目:"
+        grep -A 6 "^config FUNCTION_ERROR_INJECTION$" "$DEBUG_KCFG" 2>/dev/null || echo "  (未找到)"
+        echo "[ABK-BPF] 已修改 FUNCTION_ERROR_INJECTION Kconfig（移除 depends on）"
+    fi
+else
+    echo "[ABK-BPF][WARN] lib/Kconfig.debug 不存在: $DEBUG_KCFG"
+    # 尝试在其他位置查找
+    for alt_path in "${KERNEL_SRC}/kernel/trace/Kconfig" "${KERNEL_SRC}/lib/Kconfig.kasan"; do
+        if [[ -f "$alt_path" ]] && grep -q "^config FUNCTION_ERROR_INJECTION$" "$alt_path" 2>/dev/null; then
+            echo "[ABK-BPF] 在 $alt_path 找到 FUNCTION_ERROR_INJECTION"
+            DEBUG_KCFG="$alt_path"
+            break
+        fi
+    done
+fi
+
+# --- 2.1.7 搜索并修改 GKI ABI fragment ---
+# GKI 内核可能通过 abi_gki_aarch64.config 等 fragment 强制禁用某些 CONFIG
+# 这些 fragment 在 make gki_defconfig 时合并，可能导致 olddefconfig 清除我们的设置
+echo ""
+echo "[ABK-BPF] 搜索 GKI ABI fragment..."
+FRAGMENTS_FOUND=0
+for frag in \
+    "${KERNEL_SRC}/arch/arm64/configs/abi_gki_aarch64"*.config \
+    "${KERNEL_SRC}/arch/arm64/configs/abi_gki_aarch64"*.fragment \
+    "${KERNEL_SRC}/arch/arm64/configs/"*gki*.fragment \
+    "${KERNEL_SRC}/arch/arm64/configs/"*gki*.config; do
+    if [[ -f "$frag" ]]; then
+        FRAGMENTS_FOUND=$((FRAGMENTS_FOUND + 1))
+        echo "[ABK-BPF] 检查 fragment: $frag"
+        # 检查是否包含 BPF_LSM 或 FUNCTION_ERROR_INJECTION 的禁用行
+        if grep -qE "(BPF_LSM|FUNCTION_ERROR_INJECTION)" "$frag" 2>/dev/null; then
+            echo "[ABK-BPF] 发现相关配置行:"
+            grep -nE "(BPF_LSM|FUNCTION_ERROR_INJECTION)" "$frag"
+            # 备份
+            if [[ ! -f "${frag}.abk-bpf.bak" ]]; then
+                cp "$frag" "${frag}.abk-bpf.bak"
+            fi
+            # 移除禁用行
+            sed -i '/BPF_LSM/d' "$frag"
+            sed -i '/FUNCTION_ERROR_INJECTION/d' "$frag"
+            echo "[ABK-BPF] 已从 $(basename "$frag") 移除 BPF_LSM/FUNCTION_ERROR_INJECTION 相关行"
+        fi
+    fi
+done
+
+# 也检查 build.config 中的 fragment 引用
+if [[ -f "$BUILD_CONFIG" ]]; then
+    echo "[ABK-BPF] 检查 build.config 中的 fragment 引用:"
+    grep -i "fragment\|DEFCONFIG" "$BUILD_CONFIG" 2>/dev/null || echo "  (无 fragment 引用)"
+fi
+
+if [[ $FRAGMENTS_FOUND -eq 0 ]]; then
+    echo "[ABK-BPF] 未找到 GKI ABI fragment 文件"
+fi
+
 # --- 2.2 修改 build.config.gki.aarch64：添加 POST_DEFCONFIG_CMDS ---
 # 诊断结论（2026-07-04）：
 #   - BPF_LSM 定义在 kernel/bpf/Kconfig（不在 security/Kconfig）
@@ -281,19 +422,32 @@ fi
 
 echo ""
 echo "[ABK-BPF] Kconfig 文件状态:"
-for f in "$NET_KCFG"; do
+for f in "$NET_KCFG" "$BPF_KCFG" "$DEBUG_KCFG"; do
     if [[ -f "$f" ]]; then
-        patched=$(grep -c "ABK-BPF PATCH" "$f" 2>/dev/null || echo 0)
+        patched=$(grep -c "ABK-BPF" "$f" 2>/dev/null || echo 0)
         printf "  %-60s patched=%s\n" "$f" "$patched"
     fi
 done
 
 echo ""
+echo "[ABK-BPF] BPF_LSM Kconfig 条目（修改后）:"
+if [[ -f "$BPF_KCFG" ]]; then
+    grep -A 6 "^config BPF_LSM$" "$BPF_KCFG" 2>/dev/null || echo "  (未找到)"
+fi
+
+echo ""
+echo "[ABK-BPF] FUNCTION_ERROR_INJECTION Kconfig 条目（修改后）:"
+if [[ -f "$DEBUG_KCFG" ]]; then
+    grep -A 4 "^config FUNCTION_ERROR_INJECTION$" "$DEBUG_KCFG" 2>/dev/null || echo "  (未找到)"
+fi
+
+echo ""
 echo "[ABK-BPF] === 完成 ==="
 echo "[ABK-BPF] 策略说明："
 echo "  1. FUNCTION_TRACER/FTRACE_SYSCALLS/DYNAMIC_FTRACE 已禁用（启用后卡第一屏）"
-echo "  2. BPF_LSM 通过 POST_DEFCONFIG_CMDS 在 make olddefconfig 后强制启用"
-echo "  3. FUNCTION_ERROR_INJECTION 同样通过 POST_DEFCONFIG_CMDS 启用"
-echo "  4. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
-echo "  5. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_ERROR_INJECTION'"
+echo "  2. BPF_LSM: 修改 Kconfig 移除 depends on + 添加 default y + POST_DEFCONFIG_CMDS"
+echo "  3. FUNCTION_ERROR_INJECTION: 修改 Kconfig 移除 depends on + POST_DEFCONFIG_CMDS"
+echo "  4. 搜索并修改 GKI ABI fragment（防止强制禁用）"
+echo "  5. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
+echo "  6. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_ERROR_INJECTION'"
 echo "==================================================="
