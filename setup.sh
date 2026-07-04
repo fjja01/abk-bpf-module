@@ -167,50 +167,56 @@ else
     echo "  $TRACE_KCFG 不存在"
 fi
 
-# --- 2.2 patch security/Kconfig：添加 SECURITY_BPF 和 BPF_LSM 条目 ---
+# --- 2.2 修改 build.config.gki.aarch64：添加 POST_DEFCONFIG_CMDS ---
+# 诊断结论（2026-07-04）：
+#   - BPF_LSM 定义在 kernel/bpf/Kconfig（不在 security/Kconfig）
+#   - 依赖：BPF_EVENTS + BPF_SYSCALL + SECURITY + BPF_JIT（全部满足）
+#   - 但 make olddefconfig 会把 defconfig 中的 BPF_LSM=y 清除（原因未知）
+#   - SECURITY_BPF 在 GKI 内核中不存在（不需要）
+# 解决方案：在 make olddefconfig 后用 POST_DEFCONFIG_CMDS 直接修改 .config
+BUILD_CONFIG="${KERNEL_SRC}/build.config.gki.aarch64"
 SEC_KCFG="${KERNEL_SRC}/security/Kconfig"
 echo ""
-echo "[ABK-BPF] 检查 SECURITY_BPF Kconfig: $SEC_KCFG"
+echo "[ABK-BPF] 修改 build.config: $BUILD_CONFIG"
 
-if [[ -f "$SEC_KCFG" ]]; then
-    # 检查是否已有 SECURITY_BPF 定义
-    if grep -q "^config SECURITY_BPF" "$SEC_KCFG"; then
-        echo "[ABK-BPF] SECURITY_BPF 已存在于 Kconfig（检查为何未生效）"
-        grep -A 8 "^config SECURITY_BPF" "$SEC_KCFG"
+if [[ -f "$BUILD_CONFIG" ]]; then
+    if grep -q "ABK_BPF_POST_DEFCONFIG" "$BUILD_CONFIG" 2>/dev/null; then
+        echo "[ABK-BPF] build.config 已包含 POST_DEFCONFIG_CMDS（跳过）"
     else
-        echo "[ABK-BPF] SECURITY_BPF 不存在，添加 Kconfig 条目"
-        SECURITY_BPF_KCFG='
-config SECURITY_BPF
-	bool "BPF MAC policy"
-	depends on SECURITY
-	depends on BPF_SYSCALL
-	default y
-	help
-	  This enables the BPF MAC policy module which allows loading
-	  of BPF programs for mandatory access control.
+        # 备份
+        if [[ ! -f "${BUILD_CONFIG}.abk-bpf.bak" ]]; then
+            cp "$BUILD_CONFIG" "${BUILD_CONFIG}.abk-bpf.bak"
+        fi
+        # 追加 POST_DEFCONFIG_CMDS
+        # OUT_DIR 是 build/build.sh 设置的环境变量，指向输出目录
+        # .config 在 ${OUT_DIR}/common/.config
+        # 用 \${OUT_DIR} 转义，在 source 时不展开，在 eval 执行时展开
+        # common/scripts/config -e 启用 CONFIG，-d 禁用 CONFIG
+        cat >> "$BUILD_CONFIG" <<'BCEOF'
 
-	  If you are unsure how to answer this question, answer N.
-
-config SECURITY_BPF_HOOKS
-	bool "BPF MAC policy hooks"
-	depends on SECURITY_BPF
-	default y
-	help
-	  This enables the BPF hooks for MAC policy.
-
-config BPF_LSM
-	bool "Enable BPF LSM"
-	depends on SECURITY_BPF
-	depends on BPF_SYSCALL
-	default y
-	help
-	  Record LSM events as BPF events to allow BPF programs to
-	  implement security policy.
-'
-        patch_kconfig "$SEC_KCFG" "SECURITY_BPF" "$SECURITY_BPF_KCFG"
+# === ABK_BPF_POST_DEFCONFIG ===
+# 在 make olddefconfig 后强制启用 BPF_LSM 和 FUNCTION_ERROR_INJECTION
+# 原因：make olddefconfig 会清除 defconfig 中的 BPF_LSM=y（原因未知）
+# BPF_LSM 依赖（BPF_EVENTS/BPF_SYSCALL/SECURITY/BPF_JIT）全部满足
+POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS:-} ; common/scripts/config --file \${OUT_DIR}/common/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+# === ABK_BPF_POST_DEFCONFIG END ===
+BCEOF
+        echo "[ABK-BPF] 已添加 POST_DEFCONFIG_CMDS 到 build.config"
+        echo "[ABK-BPF] POST_DEFCONFIG_CMDS 内容:"
+        grep "POST_DEFCONFIG_CMDS" "$BUILD_CONFIG" | tail -1
     fi
 else
-    echo "[ABK-BPF][WARN] security/Kconfig 不存在"
+    echo "[ABK-BPF][ERROR] build.config.gki.aarch64 不存在: $BUILD_CONFIG"
+fi
+
+# 同时也 patch security/Kconfig 添加 SECURITY_BPF（作为兼容，即使 BPF_LSM 不依赖它）
+# 注意：这是可选的，BPF_LSM 在 GKI 内核中不依赖 SECURITY_BPF
+if [[ -f "$SEC_KCFG" ]]; then
+    if grep -q "^config SECURITY_BPF" "$SEC_KCFG"; then
+        echo "[ABK-BPF] SECURITY_BPF 已存在于 security/Kconfig"
+    else
+        echo "[ABK-BPF] SECURITY_BPF 不存在于 security/Kconfig（GKI 移除了，不影响 BPF_LSM）"
+    fi
 fi
 
 # --- 2.3 patch net/Kconfig：确保 BPF_STREAM_PARSER 可用 ---
@@ -244,7 +250,7 @@ echo "---------------------------------------------------"
 
 # 验证 defconfig
 echo "[ABK-BPF] defconfig 中的关键 CONFIG:"
-for cfg in CONFIG_FUNCTION_ERROR_INJECTION CONFIG_SECURITY_BPF CONFIG_BPF_LSM \
+for cfg in CONFIG_FUNCTION_ERROR_INJECTION CONFIG_BPF_LSM \
            CONFIG_BPF_EVENTS CONFIG_BPF_STREAM_PARSER CONFIG_DEBUG_INFO_BTF \
            CONFIG_DEBUG_INFO_BTF_MODULES; do
     result=$(grep "^${cfg}=" "$DEFCONFIG" 2>/dev/null || echo "未找到")
@@ -259,8 +265,15 @@ for cfg in CONFIG_FUNCTION_TRACER CONFIG_FTRACE_SYSCALLS CONFIG_DYNAMIC_FTRACE; 
 done
 
 echo ""
+echo "[ABK-BPF] build.config 状态:"
+if [[ -f "$BUILD_CONFIG" ]]; then
+    has_post=$(grep -c "ABK_BPF_POST_DEFCONFIG" "$BUILD_CONFIG" 2>/dev/null || echo 0)
+    printf "  %-60s POST_DEFCONFIG_CMDS=%s\n" "$BUILD_CONFIG" "$has_post"
+fi
+
+echo ""
 echo "[ABK-BPF] Kconfig 文件状态:"
-for f in "$SEC_KCFG" "$NET_KCFG"; do
+for f in "$NET_KCFG"; do
     if [[ -f "$f" ]]; then
         patched=$(grep -c "ABK-BPF PATCH" "$f" 2>/dev/null || echo 0)
         printf "  %-60s patched=%s\n" "$f" "$patched"
@@ -269,10 +282,10 @@ done
 
 echo ""
 echo "[ABK-BPF] === 完成 ==="
-echo "[ABK-BPF] 注意事项："
+echo "[ABK-BPF] 策略说明："
 echo "  1. FUNCTION_TRACER/FTRACE_SYSCALLS/DYNAMIC_FTRACE 已禁用（启用后卡第一屏）"
-echo "  2. SECURITY_BPF 已添加 Kconfig 条目 + defconfig y"
-echo "  3. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
-echo "  4. 如果编译失败，检查 Kconfig 语法错误"
-echo "  5. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|SECURITY_BPF|BPF_EVENTS'"
+echo "  2. BPF_LSM 通过 POST_DEFCONFIG_CMDS 在 make olddefconfig 后强制启用"
+echo "  3. FUNCTION_ERROR_INJECTION 同样通过 POST_DEFCONFIG_CMDS 启用"
+echo "  4. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
+echo "  5. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_ERROR_INJECTION'"
 echo "==================================================="
