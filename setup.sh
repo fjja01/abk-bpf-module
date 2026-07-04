@@ -97,23 +97,25 @@ echo ""
 echo "[ABK-BPF] === 第 1 步：修改 defconfig ==="
 echo "---------------------------------------------------"
 
-# 函数追踪基础设施
-append_config "CONFIG_FUNCTION_TRACER" "y"
-append_config "CONFIG_DYNAMIC_FTRACE" "y"
-append_config "CONFIG_DYNAMIC_FTRACE_WITH_REGS" "y"
-append_config "CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS" "y"
-append_config "CONFIG_FTRACE_SYSCALLS" "y"
+# === 警告：FUNCTION_TRACER / FTRACE_SYSCALLS / DYNAMIC_FTRACE 已禁用 ===
+# 原因：启用后卡第一屏（ftrace 早期启动死锁或 GKI ABI 校验失败）
+# 改为保守策略：只启用 BPF LSM 相关，不动 ftrace 基础设施
+# append_config "CONFIG_FUNCTION_TRACER" "y"
+# append_config "CONFIG_DYNAMIC_FTRACE" "y"
+# append_config "CONFIG_DYNAMIC_FTRACE_WITH_REGS" "y"
+# append_config "CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS" "y"
+# append_config "CONFIG_FTRACE_SYSCALLS" "y"
 
-# 函数错误注入
+# 函数错误注入（已默认 y，保留以确保）
 append_config "CONFIG_FUNCTION_ERROR_INJECTION" "y"
 # 注意：BPF_KPROBE_OVERRIDE 在 arm64 上无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）
 # append_config "CONFIG_BPF_KPROBE_OVERRIDE" "y"
 
-# BPF LSM 安全模块
+# BPF LSM 安全模块（核心目标）
 append_config "CONFIG_SECURITY_BPF" "y"
 append_config "CONFIG_BPF_LSM" "y"
 
-# 辅助可观测性选项
+# 辅助可观测性选项（BPF 相关，安全）
 append_config "CONFIG_BPF_EVENTS" "y"
 append_config "CONFIG_BPF_STREAM_PARSER" "y"
 append_config "CONFIG_DEBUG_INFO_BTF" "y"
@@ -153,68 +155,16 @@ patch_kconfig() {
     echo "[ABK-BPF] 已 patch: $kcfg_file"
 }
 
-# --- 2.1 patch kernel/trace/Kconfig：强制 FUNCTION_TRACER 可用 ---
+# --- 2.1 跳过 FUNCTION_TRACER Kconfig patch ---
+# 原因：启用 FUNCTION_TRACER 导致卡第一屏（ftrace 早期启动死锁或 GKI ABI 校验失败）
+# 不再修改 kernel/trace/Kconfig
 TRACE_KCFG="${KERNEL_SRC}/kernel/trace/Kconfig"
-echo "[ABK-BPF] 检查 FUNCTION_TRACER Kconfig: $TRACE_KCFG"
-
+echo "[ABK-BPF] 跳过 FUNCTION_TRACER Kconfig patch（保守策略，避免卡 logo）"
+echo "[ABK-BPF] kernel/trace/Kconfig 当前 FUNCTION_TRACER 状态（仅查询，不修改）:"
 if [[ -f "$TRACE_KCFG" ]]; then
-    # 查看当前 FUNCTION_TRACER 定义
-    echo "[ABK-BPF] 当前 FUNCTION_TRACER Kconfig 定义:"
-    grep -A 12 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null || echo "  (未找到 config FUNCTION_TRACER 条目)"
-
-    if [[ ! -f "${TRACE_KCFG}.abk-bpf.bak" ]]; then
-        cp "$TRACE_KCFG" "${TRACE_KCFG}.abk-bpf.bak"
-    fi
-
-    # 用 python 做最小修改（保留原 select 语句，避免编译错误）
-    # 策略：
-    #   1. 删除 depends on HAVE_FUNCTION_TRACER（解除 arm64 缺失的依赖）
-    #   2. 在 bool 行后添加 default y（如果不存在）
-    # 注意：不能整体替换 config 块，否则会丢失 select TASKS_RUDE_RCU 等关键语句
-    #       导致 ftrace.c 调用 synchronize_rcu_tasks_rude() 时编译失败
-    python3 - "$TRACE_KCFG" <<'PYEOF'
-import re, sys
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-
-changes = []
-
-# 1. 删除 FUNCTION_TRACER 的 depends on HAVE_FUNCTION_TRACER
-new_content, n1 = re.subn(r'\tdepends on HAVE_FUNCTION_TRACER\n', '', content)
-if n1 > 0:
-    changes.append(f"删除 depends on HAVE_FUNCTION_TRACER (n={n1})")
-
-# 2. 在 config FUNCTION_TRACER 块的 bool 行后插入 default y
-def add_default_after_bool(match):
-    block = match.group(0)
-    if 'default y' in block:
-        return block
-    return block + '\tdefault y\n'
-
-pattern_ft = r'config FUNCTION_TRACER\n\tbool "[^"]*"\n'
-new_content, n2 = re.subn(pattern_ft, add_default_after_bool, new_content)
-if n2 > 0:
-    changes.append(f"FUNCTION_TRACER 添加 default y (n={n2})")
-
-# 3. 在 config FTRACE_SYSCALLS 块的 bool 行后插入 default y
-pattern_fs = r'config FTRACE_SYSCALLS\n\tbool "[^"]*"\n'
-new_content, n3 = re.subn(pattern_fs, add_default_after_bool, new_content)
-if n3 > 0:
-    changes.append(f"FTRACE_SYSCALLS 添加 default y (n={n3})")
-
-if changes:
-    with open(path, 'w') as f:
-        f.write(new_content)
-    print(f"[ABK-BPF] Kconfig patch 完成: {'; '.join(changes)}")
-else:
-    print("[ABK-BPF] Kconfig 无需修改（可能已 patch）")
-PYEOF
-
-    echo "[ABK-BPF] patch 后的 FUNCTION_TRACER 定义:"
-    grep -A 12 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null
+    grep -A 4 "^config FUNCTION_TRACER" "$TRACE_KCFG" 2>/dev/null || echo "  (未找到)"
 else
-    echo "[ABK-BPF][ERROR] kernel/trace/Kconfig 不存在: $TRACE_KCFG"
+    echo "  $TRACE_KCFG 不存在"
 fi
 
 # --- 2.2 patch security/Kconfig：添加 SECURITY_BPF 和 BPF_LSM 条目 ---
@@ -294,16 +244,23 @@ echo "---------------------------------------------------"
 
 # 验证 defconfig
 echo "[ABK-BPF] defconfig 中的关键 CONFIG:"
-for cfg in CONFIG_FUNCTION_TRACER CONFIG_DYNAMIC_FTRACE CONFIG_FTRACE_SYSCALLS \
-           CONFIG_FUNCTION_ERROR_INJECTION CONFIG_SECURITY_BPF CONFIG_BPF_LSM \
-           CONFIG_BPF_EVENTS CONFIG_BPF_STREAM_PARSER CONFIG_DEBUG_INFO_BTF; do
+for cfg in CONFIG_FUNCTION_ERROR_INJECTION CONFIG_SECURITY_BPF CONFIG_BPF_LSM \
+           CONFIG_BPF_EVENTS CONFIG_BPF_STREAM_PARSER CONFIG_DEBUG_INFO_BTF \
+           CONFIG_DEBUG_INFO_BTF_MODULES; do
     result=$(grep "^${cfg}=" "$DEFCONFIG" 2>/dev/null || echo "未找到")
     printf "  %-50s %s\n" "$cfg" "$result"
 done
 
 echo ""
+echo "[ABK-BPF] 已禁用的 CONFIG（避免卡 logo）:"
+for cfg in CONFIG_FUNCTION_TRACER CONFIG_FTRACE_SYSCALLS CONFIG_DYNAMIC_FTRACE; do
+    result=$(grep "^${cfg}=" "$DEFCONFIG" 2>/dev/null || echo "(未启用)")
+    printf "  %-50s %s\n" "$cfg" "$result"
+done
+
+echo ""
 echo "[ABK-BPF] Kconfig 文件状态:"
-for f in "$TRACE_KCFG" "$SEC_KCFG" "$NET_KCFG"; do
+for f in "$SEC_KCFG" "$NET_KCFG"; do
     if [[ -f "$f" ]]; then
         patched=$(grep -c "ABK-BPF PATCH" "$f" 2>/dev/null || echo 0)
         printf "  %-60s patched=%s\n" "$f" "$patched"
@@ -313,9 +270,9 @@ done
 echo ""
 echo "[ABK-BPF] === 完成 ==="
 echo "[ABK-BPF] 注意事项："
-echo "  1. FUNCTION_TRACER 已 patch Kconfig default y + defconfig y"
+echo "  1. FUNCTION_TRACER/FTRACE_SYSCALLS/DYNAMIC_FTRACE 已禁用（启用后卡第一屏）"
 echo "  2. SECURITY_BPF 已添加 Kconfig 条目 + defconfig y"
 echo "  3. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
 echo "  4. 如果编译失败，检查 Kconfig 语法错误"
-echo "  5. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_TRACER|SECURITY_BPF'"
+echo "  5. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|SECURITY_BPF|BPF_EVENTS'"
 echo "==================================================="
