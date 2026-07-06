@@ -405,79 +405,13 @@ else
     echo "[ABK-BPF][WARN] net/Kconfig 不存在"
 fi
 
-# --- 2.5 修改 build/build.sh：在 olddefconfig 之后插入 config 修改 ---
-# 诊断结论（2026-07-04，构建 28699313001）：
-#   - POST_DEFCONFIG_CMDS 在 make olddefconfig 之前执行（名为 "post defconfig" 但实际是 "pre olddefconfig"）
-#   - make olddefconfig 会覆盖 POST_DEFCONFIG_CMDS 设置的 BPF_LSM=y
-#   - 即使修改了 Kconfig 源码（移除 depends on + 添加 default y），olddefconfig 仍然清除 BPF_LSM
-#   - 第3次 config write 发生在 ABI symbol list generation 过程中，可能也回退了 BPF_LSM
-# 解决方案：直接修改 build/build.sh，在 olddefconfig 之后和 "Building kernel" 之后插入 config 修改
-BUILD_SH="${KERNEL_ROOT}/build/build.sh"
+# --- 2.5 不修改 build/build.sh（之前的策略导致 build.sh 执行失败） ---
+# 诊断结论（2026-07-06，构建 28780938764）：
+#   - awk 修改 build/build.sh 破坏了脚本内部逻辑（gettop.sh source 失败）
+#   - 修改 build.sh 太脆弱，改用 build.config 的 PRE_BUILD_CMDS hook
+# PRE_BUILD_CMDS 在 make olddefconfig 之后、make Image 之前执行
 echo ""
-echo "[ABK-BPF] === 第 2.5 步：修改 build/build.sh ==="
-echo "---------------------------------------------------"
-echo "[ABK-BPF] 检查 build/build.sh: $BUILD_SH"
-
-if [[ -f "$BUILD_SH" ]]; then
-    if grep -q "ABK_BPF_POST_OLDDEFCONFIG" "$BUILD_SH" 2>/dev/null; then
-        echo "[ABK-BPF] build/build.sh 已修改（跳过）"
-    else
-        # 备份
-        if [[ ! -f "${BUILD_SH}.abk-bpf.bak" ]]; then
-            cp "$BUILD_SH" "${BUILD_SH}.abk-bpf.bak"
-        fi
-
-        # 检查 olddefconfig 出现次数
-        OLDDEFCONFIG_COUNT=$(grep -c 'make.*olddefconfig' "$BUILD_SH" 2>/dev/null || echo 0)
-        echo "[ABK-BPF] build/build.sh 中 'make.*olddefconfig' 出现次数: $OLDDEFCONFIG_COUNT"
-
-        # 检查 Building kernel 出现次数
-        BUILDING_COUNT=$(grep -c 'Building kernel' "$BUILD_SH" 2>/dev/null || echo 0)
-        echo "[ABK-BPF] build/build.sh 中 'Building kernel' 出现次数: $BUILDING_COUNT"
-
-        # 用 awk 修改 build/build.sh：
-        # 1. 在 olddefconfig 行之后插入 config 修改（防止 olddefconfig 回退）
-        # 2. 在 "Building kernel" 行之后插入 config 修改（防止 ABI syncconfig 回退）
-        awk '
-            /make.*olddefconfig/ && !inserted_olddefconfig {
-                print
-                print "    # ABK_BPF_POST_OLDDEFCONFIG"
-                print "    common/scripts/config --file ${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
-                print "    # ABK_BPF_POST_OLDDEFCONFIG END"
-                inserted_olddefconfig=1
-                next
-            }
-            /Building kernel/ && !inserted_building {
-                print
-                print "    # ABK_BPF_PRE_BUILD_CONFIG"
-                print "    common/scripts/config --file ${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
-                print "    # ABK_BPF_PRE_BUILD_CONFIG END"
-                inserted_building=1
-                next
-            }
-            { print }
-        ' "$BUILD_SH" > "${BUILD_SH}.tmp" && mv "${BUILD_SH}.tmp" "$BUILD_SH"
-        # 恢复执行权限（mv 替换文件会丢失原文件的执行权限）
-        chmod +x "$BUILD_SH"
-
-        echo "[ABK-BPF] 已修改 build/build.sh"
-        echo "[ABK-BPF] 修改后 olddefconfig 附近的代码:"
-        grep -A 3 "olddefconfig" "$BUILD_SH" 2>/dev/null | head -10
-        echo ""
-        echo "[ABK-BPF] 修改后 Building kernel 附近的代码:"
-        grep -A 3 "Building kernel" "$BUILD_SH" 2>/dev/null | head -10
-    fi
-else
-    echo "[ABK-BPF][WARN] build/build.sh 不存在: $BUILD_SH"
-    # 尝试其他路径
-    for alt_path in "${KERNEL_SRC}/build/build.sh" "${KERNEL_ROOT}/build.sh"; do
-        if [[ -f "$alt_path" ]]; then
-            echo "[ABK-BPF] 在 $alt_path 找到 build.sh"
-            BUILD_SH="$alt_path"
-            break
-        fi
-    done
-fi
+echo "[ABK-BPF] 跳过 build/build.sh 修改（使用 PRE_BUILD_CMDS 替代）"
 
 echo ""
 echo "[ABK-BPF] === 第 3 步：诊断输出 ==="
@@ -509,15 +443,6 @@ if [[ -f "$BUILD_CONFIG" ]]; then
 fi
 
 echo ""
-echo "[ABK-BPF] build/build.sh 状态:"
-if [[ -f "$BUILD_SH" ]]; then
-    has_olddefconfig=$(grep -c "ABK_BPF_POST_OLDDEFCONFIG" "$BUILD_SH" 2>/dev/null || echo 0)
-    has_building=$(grep -c "ABK_BPF_PRE_BUILD_CONFIG" "$BUILD_SH" 2>/dev/null || echo 0)
-    printf "  %-60s POST_OLDDEFCONFIG=%s\n" "$BUILD_SH" "$has_olddefconfig"
-    printf "  %-60s PRE_BUILD_CONFIG=%s\n" "$BUILD_SH" "$has_building"
-fi
-
-echo ""
 echo "[ABK-BPF] Kconfig 文件状态:"
 for f in "$NET_KCFG" "$BPF_KCFG" "$DEBUG_KCFG"; do
     if [[ -f "$f" ]]; then
@@ -544,10 +469,9 @@ echo "[ABK-BPF] 策略说明："
 echo "  1. FUNCTION_TRACER/FTRACE_SYSCALLS/DYNAMIC_FTRACE 已禁用（启用后卡第一屏）"
 echo "  2. BPF_LSM: 修改 Kconfig 移除 depends on + 添加 default y"
 echo "  3. FUNCTION_ERROR_INJECTION: 修改 Kconfig 移除 depends on"
-echo "  4. POST_DEFCONFIG_CMDS: 在 olddefconfig 之前设置 BPF_LSM=y（被覆盖）"
-echo "  5. PRE_BUILD_CMDS: 在 olddefconfig 之后设置 BPF_LSM=y（新策略）"
-echo "  6. 修改 build/build.sh: 在 olddefconfig 和 Building kernel 之后插入 config 修改（新策略）"
-echo "  7. 搜索并修改 GKI ABI fragment（防止强制禁用）"
-echo "  8. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
-echo "  9. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_ERROR_INJECTION'"
+echo "  4. POST_DEFCONFIG_CMDS: 在 olddefconfig 之前设置 BPF_LSM=y（可能被覆盖）"
+echo "  5. PRE_BUILD_CMDS: 在 olddefconfig 之后设置 BPF_LSM=y（主要策略）"
+echo "  6. 搜索并修改 GKI ABI fragment（防止强制禁用）"
+echo "  7. BPF_KPROBE_OVERRIDE 在 arm64 无法启用（缺 HAVE_BPF_KPROBE_OVERRIDE）"
+echo "  8. 刷入后验证: zcat /proc/config.gz | grep -E 'BPF_LSM|FUNCTION_ERROR_INJECTION'"
 echo "==================================================="
