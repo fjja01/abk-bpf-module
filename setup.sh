@@ -112,8 +112,11 @@ append_config "CONFIG_FUNCTION_ERROR_INJECTION" "y"
 # append_config "CONFIG_BPF_KPROBE_OVERRIDE" "y"
 
 # BPF LSM 安全模块（核心目标）
+# 注意：BPF_LSM 启用后导致启动失败（构建 28781814400，多次重启后回退 slot _a）
+# 原因：BPF_LSM 运行时初始化 panic（可能与 GKI 安全框架或 KernelSU LSM hooks 冲突）
+# 暂时禁用 BPF_LSM，先验证 FUNCTION_ERROR_INJECTION 是否能单独生效
 append_config "CONFIG_SECURITY_BPF" "y"
-append_config "CONFIG_BPF_LSM" "y"
+# append_config "CONFIG_BPF_LSM" "y"
 
 # 辅助可观测性选项（BPF 相关，安全）
 append_config "CONFIG_BPF_EVENTS" "y"
@@ -340,25 +343,23 @@ if [[ -f "$BUILD_CONFIG" ]]; then
         cat >> "$BUILD_CONFIG" <<'BCEOF'
 
 # === ABK_BPF_POST_DEFCONFIG ===
-# 在 make olddefconfig 后强制启用 BPF_LSM 和 FUNCTION_ERROR_INJECTION
-# 原因：make olddefconfig 会清除 defconfig 中的 BPF_LSM=y（原因未知）
-# BPF_LSM 依赖（BPF_EVENTS/BPF_SYSCALL/SECURITY/BPF_JIT）全部满足
-# 注意：OUT_DIR 已指向 .../out/android13-5.15/common，不要再加 /common
+# 在 make olddefconfig 后强制启用 FUNCTION_ERROR_INJECTION
+# 注意：BPF_LSM 已禁用（导致启动失败）
 if [ -z "${POST_DEFCONFIG_CMDS:-}" ]; then
-  POST_DEFCONFIG_CMDS="common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  POST_DEFCONFIG_CMDS="common/scripts/config --file \${OUT_DIR}/.config -e FUNCTION_ERROR_INJECTION"
 else
-  POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS} ; common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  POST_DEFCONFIG_CMDS="${POST_DEFCONFIG_CMDS} ; common/scripts/config --file \${OUT_DIR}/.config -e FUNCTION_ERROR_INJECTION"
 fi
 # === ABK_BPF_POST_DEFCONFIG END ===
 
 # === ABK_BPF_PRE_BUILD_CMDS ===
-# 在 make olddefconfig 和 ABI 处理之后、make Image 之前强制启用 BPF_LSM
+# 在 make olddefconfig 和 ABI 处理之后、make Image 之前强制启用 FUNCTION_ERROR_INJECTION
 # 诊断：POST_DEFCONFIG_CMDS 在 olddefconfig 之前执行，被 olddefconfig 覆盖
 # PRE_BUILD_CMDS 在 olddefconfig 之后执行（如果 build/build.sh 支持）
 if [ -z "${PRE_BUILD_CMDS:-}" ]; then
-  PRE_BUILD_CMDS="common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  PRE_BUILD_CMDS="common/scripts/config --file \${OUT_DIR}/.config -e FUNCTION_ERROR_INJECTION"
 else
-  PRE_BUILD_CMDS="${PRE_BUILD_CMDS} ; common/scripts/config --file \${OUT_DIR}/.config -e BPF_LSM -e FUNCTION_ERROR_INJECTION"
+  PRE_BUILD_CMDS="${PRE_BUILD_CMDS} ; common/scripts/config --file \${OUT_DIR}/.config -e FUNCTION_ERROR_INJECTION"
 fi
 # === ABK_BPF_PRE_BUILD_CMDS END ===
 BCEOF
