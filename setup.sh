@@ -457,6 +457,8 @@ if [[ -f "$BUILD_SH" ]]; then
             }
             { print }
         ' "$BUILD_SH" > "${BUILD_SH}.tmp" && mv "${BUILD_SH}.tmp" "$BUILD_SH"
+        # 恢复执行权限（mv 替换文件会丢失原文件的执行权限）
+        chmod +x "$BUILD_SH"
 
         echo "[ABK-BPF] 已修改 build/build.sh"
         echo "[ABK-BPF] 修改后 olddefconfig 附近的代码:"
